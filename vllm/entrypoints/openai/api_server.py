@@ -6,7 +6,7 @@ import os
 import importlib
 import inspect
 
-from aioprometheus import MetricsMiddleware
+from aioprometheus import MetricsMiddleware, Counter, Registry
 from aioprometheus.asgi.starlette import metrics
 import fastapi
 import uvicorn
@@ -46,7 +46,8 @@ async def lifespan(app: fastapi.FastAPI):
 
 
 app = fastapi.FastAPI(lifespan=lifespan)
-
+registry = Registry()
+counter = Counter()
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -121,7 +122,7 @@ def parse_args():
     return parser.parse_args()
 
 
-app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
+app.add_middleware(MetricsMiddleware, registry=registry)  # Trace HTTP server metrics
 app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 
 
@@ -146,6 +147,7 @@ async def show_available_models():
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
+    counter.inc()
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
     if isinstance(generator, ErrorResponse):
