@@ -11,9 +11,26 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
+from lmformatenforcer import CharacterLevelParser, JsonSchemaParser
+from lmformatenforcer.integrations.vllm import build_vllm_logits_processor, build_token_enforcer_tokenizer_data
+from typing import Union, List, Optional
+from pydantic import BaseModel
+
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
 engine = None
+
+class AnswerFormat(BaseModel):
+    first_name: str
+    last_name: str
+    year_of_birth: int
+    num_seasons_in_nba: int
+
+class ChatCompletionRequest(BaseModel):
+    prompt: str
+    stream: bool = False
+    prefix_pos: Optional[int] = None
+    temperature: float = 1.0
 
 
 @app.get("/health")
@@ -23,7 +40,7 @@ async def health() -> Response:
 
 
 @app.post("/generate")
-async def generate(request: Request) -> Response:
+async def generate(request: ChatCompletionRequest) -> Response:
     """Generate completion for the request.
 
     The request should be a JSON object with the following fields:
@@ -31,17 +48,36 @@ async def generate(request: Request) -> Response:
     - stream: whether to stream the results or not.
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
-    request_dict = await request.json()
-    prompt = request_dict.pop("prompt")
-    prefix_pos = request_dict.pop("prefix_pos", None)
-    stream = request_dict.pop("stream", False)
-    sampling_params = SamplingParams(**request_dict)
+    # request_dict = await request.json()
+    # prompt = request_dict.pop("prompt")
+    # prefix_pos = request_dict.pop("prefix_pos", None)
+    # stream = request_dict.pop("stream", False)
+    prompt = request.prompt
+    prefix_pos = request.prefix_pos
+    stream = request.stream
+    sampling_params = SamplingParams()
     request_id = random_uuid()
 
+    # tokenizer_data = build_vllm_token_enforcer_tokenizer_data(engine)
+
+    # def build_vllm_token_enforcer_tokenizer_data(llm: Union[vllm.LLM, PreTrainedTokenizerBase]) -> TokenEnforcerTokenizerData:
+    #     tokenizer = llm.get_tokenizer() if isinstance(llm, vllm.LLM) else llm
+    #     # In some vLLM versions the tokenizer is wrapped in a TokenizerGroup
+    #     if tokenizer.__class__.__name__ == 'TokenizerGroup':
+    #         tokenizer = tokenizer.tokenizer  # noqa
+    #     return build_token_enforcer_tokenizer_data(tokenizer)
+
+    tokenizer = engine.engine.tokenizer.tokenizer
+    tokenizer_data = build_token_enforcer_tokenizer_data(tokenizer)
+
+    parser = JsonSchemaParser(AnswerFormat.schema())
+    logits_processor = build_vllm_logits_processor(tokenizer_data, parser)
+    sampling_params.logits_processors = [logits_processor]
+
     results_generator = engine.generate(prompt,
-                                        sampling_params,
-                                        request_id,
-                                        prefix_pos=prefix_pos)
+                                    sampling_params,
+                                    request_id,
+                                    prefix_pos=prefix_pos)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
@@ -59,16 +95,17 @@ async def generate(request: Request) -> Response:
     # Non-streaming case
     final_output = None
     async for request_output in results_generator:
-        if await request.is_disconnected():
-            # Abort the request if the client disconnects.
-            await engine.abort(request_id)
-            return Response(status_code=499)
+        # if await request.is_disconnected():
+        #     # Abort the request if the client disconnects.
+        #     await engine.abort(request_id)
+        #     return Response(status_code=499)
         final_output = request_output
 
     assert final_output is not None
     prompt = final_output.prompt
     text_outputs = [prompt + output.text for output in final_output.outputs]
     ret = {"text": text_outputs}
+    print(ret)
     return JSONResponse(ret)
 
 

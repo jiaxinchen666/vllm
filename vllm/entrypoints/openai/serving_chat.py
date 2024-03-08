@@ -16,16 +16,18 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 logger = init_logger(__name__)
 
 
-class OpenAIServingChat(OpenAIServing):
+class OpenAIServingChat_LMFE(OpenAIServing):
 
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
                  response_role: str,
+                 logits_processor=None,
                  chat_template=None):
         super().__init__(engine=engine, served_model=served_model)
         self.response_role = response_role
         self._load_chat_template(chat_template)
+        self.logits_processor = logits_processor
 
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -66,6 +68,11 @@ class OpenAIServingChat(OpenAIServing):
             sampling_params = request.to_sampling_params()
         except ValueError as e:
             return self.create_error_response(str(e))
+        
+        if self.logits_processor:
+            sampling_params.logits_processors = [self.logits_processor]
+        else:
+            pass
 
         result_generator = self.engine.generate(prompt, sampling_params,
                                                 request_id, token_ids)
