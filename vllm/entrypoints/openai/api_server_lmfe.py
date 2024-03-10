@@ -37,8 +37,8 @@ from vllm.utils import random_uuid
 
 class AnswerFormat(BaseModel):
     chat: str
-    stage: Literal[1990, 1963, 1970]
-    img_prompt: int
+    state: Literal["穿衣服", "脱一半", "全脱"]
+    img_prompt: str
 
 class OpenAIServingChatLMFE(OpenAIServingChat):
     def __init__(self,
