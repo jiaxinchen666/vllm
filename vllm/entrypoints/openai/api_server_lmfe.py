@@ -1,3 +1,4 @@
+
 import argparse
 import asyncio
 import json
@@ -19,7 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import add_global_metrics_labels
-from vllm.entrypoints.openai.protocol import CompletionRequest, ChatCompletionRequest, ErrorResponse
+from vllm.entrypoints.openai.protocol import ErrorResponse
 from vllm.logger import init_logger
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -34,29 +35,78 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
 from vllm.utils import random_uuid
+from vllm.sampling_params import SamplingParams
+from typing import Dict, List, Literal, Optional, Union
 
-class AnswerFormat(BaseModel):
-    chat: str
-    state: Literal["穿衣服", "脱一半", "全脱"]
-    img_prompt: str
+from pydantic import BaseModel, Field
+
+class ChatCompletionRequest(BaseModel):
+    model: str
+    messages: Union[str, List[Dict[str, str]]]
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 1.0
+    n: Optional[int] = 1
+    max_tokens: Optional[int] = None
+    stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
+    stream: Optional[bool] = False
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
+    logit_bias: Optional[Dict[str, float]] = None
+    user: Optional[str] = None
+    # Additional parameters supported by vLLM
+    best_of: Optional[int] = None
+    top_k: Optional[int] = -1
+    ignore_eos: Optional[bool] = False
+    use_beam_search: Optional[bool] = False
+    stop_token_ids: Optional[List[int]] = Field(default_factory=list)
+    skip_special_tokens: Optional[bool] = True
+    spaces_between_special_tokens: Optional[bool] = True
+    add_generation_prompt: Optional[bool] = True
+    echo: Optional[bool] = False
+    repetition_penalty: Optional[float] = 1.0
+    min_p: Optional[float] = 0.0
+    include_stop_str_in_output: Optional[bool] = False
+    length_penalty: Optional[float] = 1.0
+    answerformat: Optional[dict] = None
+    
+    def to_sampling_params(self) -> SamplingParams:
+        return SamplingParams(
+            n=self.n,
+            presence_penalty=self.presence_penalty,
+            frequency_penalty=self.frequency_penalty,
+            repetition_penalty=self.repetition_penalty,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            min_p=self.min_p,
+            stop=self.stop,
+            stop_token_ids=self.stop_token_ids,
+            max_tokens=self.max_tokens,
+            best_of=self.best_of,
+            top_k=self.top_k,
+            ignore_eos=self.ignore_eos,
+            use_beam_search=self.use_beam_search,
+            skip_special_tokens=self.skip_special_tokens,
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
+            include_stop_str_in_output=self.include_stop_str_in_output,
+            length_penalty=self.length_penalty,
+        )
+
 
 class OpenAIServingChatLMFE(OpenAIServingChat):
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
                  response_role: str,
-                 logits_processor=None,
                  chat_template=None):
         super().__init__(engine=engine, 
                          served_model=served_model, 
                          response_role=response_role, 
                          chat_template=chat_template)
-        self.logits_processor = logits_processor
         self.response_role = response_role
         self._load_chat_template(chat_template)
     
     async def create_chat_completion(
-        self, request: ChatCompletionRequest, raw_request: Request
+        self, request: ChatCompletionRequest, raw_request: Request, answerformat=None,
     ) -> Union[ErrorResponse, AsyncGenerator[str, None],
                ChatCompletionResponse]:
         """Completion API similar to OpenAI's API.
@@ -96,8 +146,10 @@ class OpenAIServingChatLMFE(OpenAIServingChat):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        if self.logits_processor:
-            sampling_params.logits_processors = [self.logits_processor]
+        if answerformat:
+            parser = JsonSchemaParser(answerformat)
+            logits_processor = build_vllm_logits_processor(tokenizer_data, parser)
+            sampling_params.logits_processors = [logits_processor]
         else:
             pass
 
@@ -234,8 +286,13 @@ async def show_available_models():
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     # counter.inc()
-    generator = await openai_serving_chat.create_chat_completion(
-        request, raw_request)
+    print(request.answerformat)
+    if request.answerformat:
+        generator = await openai_serving_chat.create_chat_completion(
+            request=request, raw_request=raw_request, answerformat=request.answerformat)
+    else:
+        generator = await openai_serving_chat.create_chat_completion(
+            request=request, raw_request=raw_request)        
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -244,21 +301,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
                                  media_type="text/event-stream")
     else:
         return JSONResponse(content=generator.model_dump())
-
-
-@app.post("/v1/completions")
-async def create_completion(request: CompletionRequest, raw_request: Request):
-    generator = await openai_serving_completion.create_completion(
-        request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
-    else:
-        return JSONResponse(content=generator.model_dump())
-
 
 if __name__ == "__main__":
     args = parse_args()
@@ -307,12 +349,8 @@ if __name__ == "__main__":
     tokenizer = engine.engine.tokenizer.tokenizer
     tokenizer_data = build_token_enforcer_tokenizer_data(tokenizer)
 
-    parser = JsonSchemaParser(AnswerFormat.model_json_schema())
-    logits_processor = build_vllm_logits_processor(tokenizer_data, parser)
-
     openai_serving_chat = OpenAIServingChatLMFE(engine, served_model,
                                             args.response_role,
-                                            logits_processor,
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(engine, served_model)
 
